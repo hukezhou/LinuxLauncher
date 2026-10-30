@@ -1,0 +1,16 @@
+# Build artifacts
+bin/
+obj/
+.vs/
+*.user
+
+# App runtime config (contains real server address / API keys)
+config.json
+
+# Local tooling / editor state
+.claude/
+
+# Root-level debug scratch (scripts + screenshots)
+/*.ps1
+/*.png
+requirements.txt

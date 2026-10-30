@@ -1,0 +1,24 @@
+{
+  "serverAddress": "myuser@example.host",
+  "useScreen": false,
+  "pasteWaitTime": 3,
+  "models": [
+    {
+      "name": "Example Model",
+      "fullText": "source .venv/bin/activate\nvllm serve /path/to/model --served-model-name example",
+      "commands": [
+        {
+          "start": 0,
+          "length": 25,
+          "groupId": 1
+        },
+        {
+          "start": 26,
+          "length": 53,
+          "groupId": 2
+        }
+      ],
+      "collapsedGroups": []
+    }
+  ]
+}
