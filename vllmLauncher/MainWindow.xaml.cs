@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -782,10 +783,15 @@ namespace vllmLauncher
             string command = GetFullGroupCommand(group);
             if (string.IsNullOrWhiteSpace(command)) return;
 
-            // Clicking a rolled-up link runs its complete command (hidden lines included);
-            // expansion is only via the chevron button or the context menu.
             _lastLinkExecutedGroup = group;
             _lastLinkExecuteTime = now;
+
+            // A link whose whole command is a single http(s) address opens in the default
+            // browser; anything else is pasted into the terminal.
+            if (TryOpenInBrowser(command)) return;
+
+            // Clicking a rolled-up link runs its complete command (hidden lines included);
+            // expansion is only via the chevron button or the context menu.
             _viewModel.ExecuteScript(command);
         }
 
@@ -801,6 +807,32 @@ namespace vllmLauncher
             if (record != null && record.HiddenLines.Count > 0)
                 text += "\n" + string.Join("\n", record.HiddenLines);
             return text;
+        }
+
+        /// <summary>
+        /// When the complete command is just a single web address (http:// or https://, no
+        /// spaces, no extra lines), open it in the system default browser. Returns false for
+        /// anything else, or when no browser could be started, so the caller can still run
+        /// it as a terminal command.
+        /// </summary>
+        private static bool TryOpenInBrowser(string command)
+        {
+            string url = command.Trim();
+            if (url.Length == 0 || url.IndexOfAny(new[] { '\n', '\r', ' ', '\t' }) >= 0) return false;
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return false;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri)) return false;
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+
+            try
+            {
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                return true;
+            }
+            catch (Exception)
+            {
+                return false; // no browser/file association -> execute it in the terminal instead
+            }
         }
 
         private string GetGroupText(CommandGroup group)
