@@ -294,7 +294,12 @@ namespace vllmLauncher.ViewModel
                     System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
                 return;
             }
-            _psService.StartWithDelay(ServerAddress, script, UseScreen, PasteWaitTime);
+            // 持久化是一次性开关：本次按快照值发送（screen+脚本），发送后自动关闭，
+            // 后续命令不再包screen（screen会话已由首条命令建立）。
+            bool useScreenThisRun = UseScreen;
+            _psService.StartWithDelay(ServerAddress, script, useScreenThisRun, PasteWaitTime);
+            if (useScreenThisRun)
+                UseScreen = false;
         }
 
         private ModelConfigViewModel CreateModelViewModel(ModelConfig config)
