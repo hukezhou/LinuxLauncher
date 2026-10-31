@@ -141,10 +141,11 @@ namespace vllmLauncher.Services
                     if (!safePaste) return; // 宁可跳过，也不把命令敲进别的窗口
                     System.Threading.Thread.Sleep(100);
 
-                    // a) 如果useScreen为true，先发送screen命令
+                    // a) 如果useScreen为true，先逐字符键入screen命令（前台确认+注入重试+整行重发）。
+                    //    两轮都没能完整键入则放弃本次执行：宁可不发，也不把残命令按Enter跑起来。
                     if (useScreen)
                     {
-                        SendKeysUnicode("screen -S qwen", hwnd);
+                        if (!SendCommandReliable("screen -S qwen", hwnd)) return;
                         System.Threading.Thread.Sleep(100);
                         SendVkInput(0x0D); // ENTER
                         System.Threading.Thread.Sleep(2000);
@@ -355,17 +356,60 @@ namespace vllmLauncher.Services
             }
         }
 
-        /// <summary>通过SendInput发送Unicode字符</summary>
-        private void SendKeysUnicode(string text, IntPtr targetHwnd)
+        /// <summary>通过SendInput发送Unicode字符（逐字符，带前台确认与注入重试）。
+        /// 间隔带随机抖动，适配慢速SSH的输入背压；任一字符彻底失败即返回false。</summary>
+        private bool SendKeysUnicode(string text, IntPtr targetHwnd)
         {
+            var rng = new Random();
             foreach (char c in text)
             {
+                if (!SendCharReliable(c, targetHwnd)) return false;
+                System.Threading.Thread.Sleep(120 + rng.Next(-25, 26)); // 120ms ± 25ms
+            }
+            return true;
+        }
+
+        /// <summary>发送单个Unicode字符：注入前确认目标在前台，SendInput未全部入队则重试。</summary>
+        private bool SendCharReliable(char c, IntPtr targetHwnd)
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (GetForegroundWindow() != targetHwnd)
+                    ForceForegroundWindow(targetHwnd);
+
                 var inputs = new INPUT[2];
                 inputs[0] = CreateKeyInput(c, false);
                 inputs[1] = CreateKeyInput(c, true);
-                SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
-                System.Threading.Thread.Sleep(30);
+                if (SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT))) == 2)
+                    return true;
+
+                System.Threading.Thread.Sleep(120);
             }
+            return false;
+        }
+
+        /// <summary>
+        /// 逐字符键入整条命令；若中途有字符彻底注入失败，发 Ctrl+C（取消当前输入行）
+        /// 后整行重发一次。返回false表示两轮都没完整键入，调用方不应再按Enter。
+        /// </summary>
+        private bool SendCommandReliable(string text, IntPtr targetHwnd)
+        {
+            for (int round = 0; round < 2; round++)
+            {
+                if (round > 0)
+                {
+                    // 取消上一轮键入到一半的残行，再从头来过。
+                    // 用Ctrl+C而非Ctrl+U：Ctrl+C在bash/PowerShell/cmd都能取消当前输入行，
+                    // Ctrl+U只在bash(readline)有效，在PS控制台只是回显^U，清不掉残行。
+                    SendVkInputDown(0x11); // Ctrl
+                    SendVkInput(0x43);     // C
+                    SendVkInputUp(0x11);
+                    System.Threading.Thread.Sleep(300);
+                }
+                if (SendKeysUnicode(text, targetHwnd))
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>原样发送脚本内容，\n\r 正常发送，最后再发一个Enter确保执行</summary>
