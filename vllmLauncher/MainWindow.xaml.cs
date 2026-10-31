@@ -87,6 +87,9 @@ namespace vllmLauncher
             ScriptEditor.MouseLeave += Editor_MouseLeave;
             ScriptEditor.PreviewMouseLeftButtonDown += Editor_PreviewMouseLeftButtonDown;
             ScriptEditor.PreviewMouseLeftButtonUp += Editor_PreviewMouseLeftButtonUp;
+            // A lost window can miss the editor's MouseLeave; make sure the hand override
+            // never outlives the window being active.
+            Deactivated += (s, e) => Mouse.OverrideCursor = null;
             LoadDocumentFromModel();
         }
 
@@ -136,6 +139,7 @@ namespace vllmLauncher
             _loadingDocument = true;
             _hoverGroup = null;
             ScriptEditor.Cursor = null;
+            Mouse.OverrideCursor = null;
             try
             {
                 var doc = new FlowDocument
@@ -220,6 +224,10 @@ namespace vllmLauncher
 
         private void EditorContextMenu_Opening(object sender, ContextMenuEventArgs e)
         {
+            // The popup shares this process, so an active hand override would also apply
+            // to the menu items; drop it while the menu is up.
+            Mouse.OverrideCursor = null;
+            _hoverGroup = null;
             _pendingUnwrapGroup = null;
             _pendingCollapseGroup = null;
             var sel = ScriptEditor.Selection;
@@ -598,6 +606,7 @@ namespace vllmLauncher
                 Tag = group,
                 ToolTip = "展开",
                 Margin = new Thickness(8, 0, 0, 0),
+                Cursor = Cursors.Hand,
             };
             // The button has no text content: give it an accessible name.
             button.SetValue(System.Windows.Automation.AutomationProperties.NameProperty, "展开命令");
@@ -710,19 +719,34 @@ namespace vllmLauncher
 
         private void Editor_PreviewMouseMove(object sender, MouseEventArgs e)
         {
-            var group = GetGroupFromHit(e.OriginalSource);
+            // While the left button is down the user is selecting text: keep the normal
+            // text cursor instead of the hand.
+            var group = e.LeftButton == MouseButtonState.Pressed ? null : GetGroupFromHit(e.OriginalSource);
             if (ReferenceEquals(group, _hoverGroup)) return;
 
             if (_hoverGroup != null) SetGroupHover(_hoverGroup, false);
             _hoverGroup = group;
             if (group != null) SetGroupHover(group, true);
-            ScriptEditor.Cursor = group != null ? Cursors.Hand : null;
+            SetEditorTextCursor(group != null ? Cursors.Hand : null);
         }
 
         private void Editor_MouseLeave(object sender, MouseEventArgs e)
         {
             if (_hoverGroup != null) { SetGroupHover(_hoverGroup, false); _hoverGroup = null; }
             ScriptEditor.Cursor = null;
+            SetEditorTextCursor(null);
+        }
+
+        /// <summary>
+        /// .NET's RichTextBox renders text with the island text stack (PageVisual/
+        /// ParagraphVisual): that layer shows the I-beam regardless of any element-level
+        /// Cursor, so the hand must be applied through the mouse override while a link
+        /// is hovered. Cleared on editor leave, model switch and window deactivation.
+        /// </summary>
+        private void SetEditorTextCursor(Cursor? cursor)
+        {
+            if (!ReferenceEquals(Mouse.OverrideCursor, cursor))
+                Mouse.OverrideCursor = cursor;
         }
 
         /// <summary>Highlight/un-highlight every hyperlink segment belonging to the group.</summary>
