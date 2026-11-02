@@ -81,7 +81,8 @@ namespace vllmLauncher.Services
         /// <summary>
         /// 1) 打开PowerShell，SSH登录
         /// 2) 获取窗口句柄
-        /// 3) Timer延时5秒：脚本复制到剪贴板 → Ctrl+V粘贴 → 延时200ms → Enter
+        /// 3) Timer延时：脚本复制到剪贴板 → Ctrl+V粘贴 → 延时200ms → Enter
+        ///    （useScreen时：粘贴前先逐字符键入screen会话，发送后延时5秒再发 Ctrl+A + d 转入后台）
         /// </summary>
         public void StartWithDelay(string serverAddress, string scriptText, bool useScreen, double pasteWaitTime = 3.0)
         {
@@ -154,28 +155,28 @@ namespace vllmLauncher.Services
                     // b) 脚本内容复制到剪贴板（Win32 API，不依赖STA线程）
                     SetClipboardTextWin32(scriptText);
 
-                    // c) Ctrl+V 粘贴
-                    SendVkInputDown(0x11); // Ctrl down
-                    SendVkInputDown(0x56); // V down
-                    System.Threading.Thread.Sleep(50);
-                    SendVkInputUp(0x56);  // V up
-                    SendVkInputUp(0x11);  // Ctrl up
+                    // c) Ctrl+V 粘贴（组合键一次入队，见 SendCtrlCombo）
+                    if (!SendCtrlCombo(0x56, hwnd)) return; // V
 
                     // d) 延时200ms后发送Enter
                     System.Threading.Thread.Sleep(200);
                     SendVkInput(0x0D); // ENTER
 
-                    // e) 当useScreen开启时，延时5秒后发送Ctrl+A和Ctrl+D
+                    // e) 当useScreen开启时，延时5秒后发screen的detach命令：Ctrl+A 再跟裸 d。
+                    //    screen默认绑定是 "C-a d, C-a C-d (detach)"：两种写法都有效，
+                    //    但裸 d 省掉第二个Ctrl —— 少一次修饰键切换，就少一次
+                    //    “字母丢掉Ctrl、变成普通字符打进shell”的风险（提示符上残'd'的来源）。
                     if (useScreen)
                     {
                         System.Threading.Thread.Sleep(5000);
-                        SendVkInputDown(0x11); SendVkInputDown(0x41);
-                        System.Threading.Thread.Sleep(50);
-                        SendVkInputUp(0x41);   SendVkInputUp(0x11);
-                        System.Threading.Thread.Sleep(50);
-                        SendVkInputDown(0x11); SendVkInputDown(0x44);
-                        System.Threading.Thread.Sleep(50);
-                        SendVkInputUp(0x44);   SendVkInputUp(0x11);
+                        // 这5秒里前台可能已被别的窗口抢走：先重新抢回目标窗口并确认，
+                        // 否则按键打进别的窗口，screen 收不到命令，字符还落进别人的输入行。
+                        EnsureForegroundWindow(hwnd);
+                        if (GetForegroundWindow() != hwnd) return;
+
+                        if (!SendCtrlCombo(0x41, hwnd)) return; // Ctrl+A：screen 的命令字符
+                        System.Threading.Thread.Sleep(200);      // 给命令模式留出切换时间
+                        SendCharReliable('d', hwnd);             // d：detach（Unicode注入，带前台确认+重试）
                     }
                 }
                 catch { }
@@ -401,9 +402,7 @@ namespace vllmLauncher.Services
                     // 取消上一轮键入到一半的残行，再从头来过。
                     // 用Ctrl+C而非Ctrl+U：Ctrl+C在bash/PowerShell/cmd都能取消当前输入行，
                     // Ctrl+U只在bash(readline)有效，在PS控制台只是回显^U，清不掉残行。
-                    SendVkInputDown(0x11); // Ctrl
-                    SendVkInput(0x43);     // C
-                    SendVkInputUp(0x11);
+                    SendCtrlCombo(0x43, targetHwnd); // Ctrl+C
                     System.Threading.Thread.Sleep(300);
                 }
                 if (SendKeysUnicode(text, targetHwnd))
@@ -443,6 +442,32 @@ namespace vllmLauncher.Services
             SendInput(1, new[] { input }, Marshal.SizeOf(typeof(INPUT)));
         }
 
+        /// <summary>
+        /// 发送 Ctrl+Vk 组合键：Ctrl↓、Vk↓、Vk↑、Ctrl↑ 四个事件放进同一次 SendInput。
+        /// 分开调用时 Ctrl↓ 与字母↓ 之间是0间隔，字母容易丢掉Ctrl——后果不是“没反应”，
+        /// 而是shell里凭空多出一个普通字符（组合键没生效、字符却进了输入行）。
+        /// 注入前确认目标在前台，未全部入队则重试；彻底失败返回false。
+        /// </summary>
+        private bool SendCtrlCombo(ushort vk, IntPtr targetHwnd)
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (GetForegroundWindow() != targetHwnd)
+                    ForceForegroundWindow(targetHwnd);
+
+                var inputs = new INPUT[4];
+                inputs[0] = CreateVkInput(0x11, false); // Ctrl down
+                inputs[1] = CreateVkInput(vk, false);    // 字母 down
+                inputs[2] = CreateVkInput(vk, true);     // 字母 up
+                inputs[3] = CreateVkInput(0x11, true);   // Ctrl up
+                if (SendInput(4, inputs, Marshal.SizeOf(typeof(INPUT))) == 4)
+                    return true;
+
+                System.Threading.Thread.Sleep(120);
+            }
+            return false;
+        }
+
         /// <summary>通过Win32 API写入剪贴板（不依赖STA线程）</summary>
         private void SetClipboardTextWin32(string text)
         {
@@ -471,6 +496,19 @@ namespace vllmLauncher.Services
                 CloseClipboard();
                 throw;
             }
+        }
+
+        /// <summary>构造虚拟键INPUT（Vk注入，用于需要修饰键参与的组合键）</summary>
+        private INPUT CreateVkInput(ushort vk, bool keyUp)
+        {
+            return new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                union = new INPUTUNION
+                {
+                    ki = new KEYBDINPUT { wVk = vk, dwFlags = (uint)(keyUp ? KEYEVENTF_KEYUP : 0) }
+                }
+            };
         }
 
         private INPUT CreateKeyInput(char c, bool keyUp)
